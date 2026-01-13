@@ -83,6 +83,65 @@ int64_t llama_time_us(void) {
     return ggml_time_us();
 }
 
+// setup devices
+// Returns false on error
+static bool llama_model_setup_devices(llama_model & model, const llama_model_params & params) {
+    // create list of devices to use with this model
+    if (params.devices) {
+        for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
+            model.devices.push_back(*dev);
+        }
+    } else {
+        std::vector<ggml_backend_dev_t> rpc_servers;
+        // use all available devices
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            switch (ggml_backend_dev_type(dev)) {
+                case GGML_BACKEND_DEVICE_TYPE_CPU:
+                case GGML_BACKEND_DEVICE_TYPE_ACCEL:
+                    // skip CPU backends since they are handled separately
+                    break;
+
+                case GGML_BACKEND_DEVICE_TYPE_GPU:
+                    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+                    if (ggml_backend_reg_name(reg) == std::string("RPC")) {
+                        rpc_servers.push_back(dev);
+                    } else {
+                        model.devices.push_back(dev);
+                    }
+                    break;
+            }
+        }
+        // add RPC servers at the front of the list
+        if (!rpc_servers.empty()) {
+            model.devices.insert(model.devices.begin(), rpc_servers.begin(), rpc_servers.end());
+        }
+    }
+
+    // if using single GPU mode, remove all except the main GPU
+    if (params.split_mode == LLAMA_SPLIT_MODE_NONE) {
+        if (params.main_gpu < 0) {
+            model.devices.clear();
+        } else {
+            if (params.main_gpu >= (int)model.devices.size()) {
+                LLAMA_LOG_ERROR("%s: invalid value for main_gpu: %d (available devices: %zu)\n", __func__, params.main_gpu, model.devices.size());
+                return false;
+            }
+            ggml_backend_dev_t main_gpu = model.devices[params.main_gpu];
+            model.devices.clear();
+            model.devices.push_back(main_gpu);
+        }
+    }
+
+    for (auto * dev : model.devices) {
+        size_t free, total; // NOLINT
+        ggml_backend_dev_memory(dev, &free, &total);
+        LLAMA_LOG_INFO("%s: using device %s (%s) - %zu MiB free\n", __func__, ggml_backend_dev_name(dev), ggml_backend_dev_description(dev), free/1024/1024);
+    }
+
+    return true;
+}
+
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static int llama_model_load(const std::string & fname, std::vector<std::string> & splits, llama_model & model, llama_model_params & params) {
     // loading time will be recalculated after the first eval, so
@@ -164,58 +223,9 @@ static struct llama_model * llama_model_load_from_file_impl(
 
     llama_model * model = new llama_model(params);
 
-    // create list of devices to use with this model
-    if (params.devices) {
-        for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
-            model->devices.push_back(*dev);
-        }
-    } else {
-        std::vector<ggml_backend_dev_t> rpc_servers;
-        // use all available devices
-        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-            switch (ggml_backend_dev_type(dev)) {
-                case GGML_BACKEND_DEVICE_TYPE_CPU:
-                case GGML_BACKEND_DEVICE_TYPE_ACCEL:
-                    // skip CPU backends since they are handled separately
-                    break;
-
-                case GGML_BACKEND_DEVICE_TYPE_GPU:
-                    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-                    if (ggml_backend_reg_name(reg) == std::string("RPC")) {
-                        rpc_servers.push_back(dev);
-                    } else {
-                        model->devices.push_back(dev);
-                    }
-                    break;
-            }
-        }
-        // add RPC servers at the front of the list
-        if (!rpc_servers.empty()) {
-            model->devices.insert(model->devices.begin(), rpc_servers.begin(), rpc_servers.end());
-        }
-    }
-
-    // if using single GPU mode, remove all except the main GPU
-    if (params.split_mode == LLAMA_SPLIT_MODE_NONE) {
-        if (params.main_gpu < 0) {
-            model->devices.clear();
-        } else {
-            if (params.main_gpu >= (int)model->devices.size()) {
-                LLAMA_LOG_ERROR("%s: invalid value for main_gpu: %d (available devices: %zu)\n", __func__, params.main_gpu, model->devices.size());
-                llama_model_free(model);
-                return nullptr;
-            }
-            ggml_backend_dev_t main_gpu = model->devices[params.main_gpu];
-            model->devices.clear();
-            model->devices.push_back(main_gpu);
-        }
-    }
-
-    for (auto * dev : model->devices) {
-        size_t free, total; // NOLINT
-        ggml_backend_dev_memory(dev, &free, &total);
-        LLAMA_LOG_INFO("%s: using device %s (%s) - %zu MiB free\n", __func__, ggml_backend_dev_name(dev), ggml_backend_dev_description(dev), free/1024/1024);
+    if (!llama_model_setup_devices(*model, params)) {
+        llama_model_free(model);
+        return nullptr;
     }
 
     const int status = llama_model_load(path_model, splits, *model, params);

@@ -551,6 +551,8 @@ FILE * ggml_fopen(const char * fname, const char * mode) {
 
         GGML_FREE(wfname);
         GGML_FREE(wmode);
+    } else {
+        errno = EINVAL;
     }
 
     return file;
@@ -1150,10 +1152,11 @@ int64_t ggml_nelements(const struct ggml_tensor * tensor) {
     return tensor->ne[0]*tensor->ne[1]*tensor->ne[2]*tensor->ne[3];
 }
 
+// get the number of rows for a tensor
 int64_t ggml_nrows(const struct ggml_tensor * tensor) {
     static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
 
-    return tensor->ne[1]*tensor->ne[2]*tensor->ne[3];
+    return (int64_t)((uint64_t)tensor->ne[1]*(uint64_t)tensor->ne[2]*(uint64_t)tensor->ne[3]);
 }
 
 size_t ggml_nbytes(const struct ggml_tensor * tensor) {
